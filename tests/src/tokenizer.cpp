@@ -7,14 +7,14 @@
 
 TEST(Tokenizer, emptyString) {
   http_mp::Tokenizer t{""};
-  ASSERT_TRUE(t.next_token().is_end);
+  http_mp::Token token = t.next_token();
+  ASSERT_TRUE(token.is_end);
+  ASSERT_EQ(token.token, "");
 }
 
 TEST(Tokenizer, singelToken) {
   http_mp::Tokenizer t{"asdf"};
   http_mp::Token token = t.next_token();
-  ASSERT_FALSE(token.is_end);
-  ASSERT_EQ(token.token, "asdf");
-  token = t.next_token();
   ASSERT_TRUE(token.is_end);
+  ASSERT_EQ(token.token, "asdf");
 }
