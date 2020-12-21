@@ -5,3 +5,4 @@ project(http-mp VERSION 0.0.1)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_subdirectory(http-mp)
+add_subdirectory(tests)
