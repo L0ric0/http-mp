@@ -1,6 +1,14 @@
-file(GLOB_RECURSE SOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "src/*.cpp")
-
-add_library(http-mp ${SOURCES})
+add_library(http-mp
+    "include/http_mp/http_mp.hpp"
+    "include/http_mp/method.hpp"
+    "include/http_mp/parser.hpp" "src/parser.cpp"
+    "include/http_mp/request.hpp"
+    "include/http_mp/state.hpp"
+)
 
 target_include_directories(http-mp PUBLIC include)
 target_include_directories(http-mp PUBLIC "${PROJECT_BINARY_DIR}/include")
+
+if(COVERAGE)
+    append_coverage_compiler_flags()
+endif()

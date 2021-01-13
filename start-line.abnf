@@ -1,0 +1,12 @@
+HTTP-message = start-line *( header-field CRLF ) CRLF [ message-body ]
+start-line = request-line / status-line
+request-line = method SP request-target SP HTTP-version CRLF
+method = token
+request-target = origin-form / absolute-form / authority-form /
+    asterisk-form
+HTTP-version = HTTP-name "/" DIGIT "." DIGIT
+HTTP-name = %x48.54.54.50 ; HTTP
+status-line = HTTP-version SP status-code SP reason-phrase CRLF
+status-code = 3DIGIT
+reason-phrase = *( HTAB / SP / VCHAR / obs-text )
+obs-text = %x80-FF
