@@ -4,10 +4,14 @@
 // http-mp
 #include "http_mp/method.hpp"
 
+// stl
+#include <string>
+
 namespace http_mp {
 
 struct Request {
   Method method;
+  std::string target;
 
   bool operator==(const Request &request) const = default;
 };

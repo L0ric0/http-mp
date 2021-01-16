@@ -9,6 +9,7 @@
 #include <array>
 #include <functional>
 #include <istream>
+#include <optional>
 #include <streambuf>
 #include <string_view>
 #include <unordered_map>
@@ -16,12 +17,16 @@
 
 namespace std {
 
-template <> struct hash<std::pair<http_mp::State, char>> {
+template <> struct hash<std::pair<http_mp::RequestState, std::optional<char>>> {
   std::size_t
-  operator()(std::pair<http_mp::State, char> const &p) const noexcept {
-    std::size_t h1 = std::hash<http_mp::State>{}(p.first);
-    std::size_t h2 = std::hash<char>{}(p.second);
-    return h1 ^ (h2 << 1);
+  operator()(std::pair<http_mp::RequestState, std::optional<char>> const &p)
+      const noexcept {
+    std::size_t h1 = std::hash<http_mp::RequestState>{}(p.first);
+    if (p.second) {
+      std::size_t h2 = std::hash<std::optional<char>>{}(p.second);
+      return h1 ^ (h2 << 1);
+    }
+    return h1;
   }
 };
 
@@ -29,219 +34,267 @@ template <> struct hash<std::pair<http_mp::State, char>> {
 
 namespace http_mp {
 
-class Parser {
+class RequestParser {
 public:
-  Parser(std::streambuf *message);
+  RequestParser(std::streambuf *message);
 
-  static const std::array<char, 19> &generate_separators() {
-    static const std::array<char, 19> separators{
-        '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"',
-        '/', '[', ']', '?', '=', '{', '}', ' ', '\t'};
-    return separators;
+  // const char maps
+  static const std::unordered_map<char, bool> &generate_gen_delimiters() {
+    static const std::unordered_map<char, bool> gen_delimiters{
+        {':', true}, {'/', true}, {'?', true}, {'#', true},
+        {'[', true}, {']', true}, {'@', true},
+    };
+    return gen_delimiters;
   }
 
-  const std::array<char, 19> &separators = generate_separators();
+  const std::unordered_map<char, bool> gen_delimiters =
+      generate_gen_delimiters();
 
-  static const std::array<char, 78> &generate_tokens() {
-    static const std::array<char, 78> tokens{
-        ' ', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '0', '1',
-        '2', '3', '4', '5', '6', '7', '8',  '9', 'A', 'B', 'C', 'D', 'E',
-        'F', 'G', 'H', 'I', 'J', 'K', 'L',  'M', 'N', 'O', 'P', 'Q', 'R',
-        'S', 'T', 'U', 'V', 'W', 'X', 'Y',  'Z', '^', '_', '`', 'a', 'b',
-        'c', 'd', 'e', 'f', 'g', 'h', 'i',  'j', 'k', 'l', 'm', 'n', 'o',
-        'p', 'q', 'r', 's', 't', 'u', 'v',  'w', 'x', 'y', 'z', '|', '~'};
-    return tokens;
+  static const std::unordered_map<char, bool> &generate_sub_delimiters() {
+    static const std::unordered_map<char, bool> sub_delimiters{
+        {'!', true}, {'$', true}, {'&', true}, {'\'', true},
+        {'(', true}, {')', true}, {'*', true}, {'+', true},
+        {',', true}, {';', true}, {'=', true},
+    };
+    return sub_delimiters;
   }
 
-  const std::array<char, 78> &tokens = generate_tokens();
+  const std::unordered_map<char, bool> sub_delimiters =
+      generate_sub_delimiters();
 
+  static const std::unordered_map<char, bool> &generate_numbers() {
+    static const std::unordered_map<char, bool> numbers{
+        {'0', true}, {'1', true}, {'2', true}, {'3', true}, {'4', true},
+        {'5', true}, {'6', true}, {'7', true}, {'8', true}, {'9', true},
+    };
+    return numbers;
+  }
+
+  const std::unordered_map<char, bool> numbers = generate_numbers();
+
+  static const std::unordered_map<char, bool> &generate_unreserved() {
+    static const std::unordered_map<char, bool> unreserved{
+        {'-', true}, {'.', true}, {'_', true}, {'~', true}, {'0', true},
+        {'1', true}, {'2', true}, {'3', true}, {'4', true}, {'5', true},
+        {'6', true}, {'7', true}, {'8', true}, {'9', true}, {'a', true},
+        {'b', true}, {'c', true}, {'d', true}, {'e', true}, {'f', true},
+        {'g', true}, {'h', true}, {'i', true}, {'j', true}, {'k', true},
+        {'l', true}, {'m', true}, {'n', true}, {'o', true}, {'p', true},
+        {'q', true}, {'r', true}, {'s', true}, {'t', true}, {'u', true},
+        {'v', true}, {'w', true}, {'x', true}, {'y', true}, {'z', true},
+        {'A', true}, {'B', true}, {'C', true}, {'D', true}, {'E', true},
+        {'F', true}, {'G', true}, {'H', true}, {'I', true}, {'J', true},
+        {'K', true}, {'L', true}, {'M', true}, {'N', true}, {'O', true},
+        {'P', true}, {'Q', true}, {'R', true}, {'S', true}, {'T', true},
+        {'U', true}, {'V', true}, {'W', true}, {'X', true}, {'Y', true},
+        {'Z', true},
+    };
+    return unreserved;
+  }
+
+  const std::unordered_map<char, bool> unreserved = generate_unreserved();
+
+  // state machine maps
   static const std::unordered_map<
-      State, std::function<Request(Parser &, Request &, char)>> &
+      RequestState, std::function<Request(RequestParser &, Request &)>> &
   generate_state_func_map() {
 
+    using enum RequestState;
+
     static const std::unordered_map<
-        State, std::function<Request(Parser &, Request &, char)>>
+        RequestState, std::function<Request(RequestParser &, Request &)>>
         &state_func_map{
-            {State::ACL_req, Parser::set_method},
-            {State::BASELINE_CONTROL_req, Parser::set_method},
-            {State::BIND_req, Parser::set_method},
-            {State::CHECKIN_req, Parser::set_method},
-            {State::CHECKOUT_req, Parser::set_method},
-            {State::CONNECT_req, Parser::set_method},
-            {State::COPY_req, Parser::set_method},
-            {State::DELETE_req, Parser::set_method},
-            {State::GET_req, Parser::set_method},
-            {State::HEAD_req, Parser::set_method},
-            {State::LABEL_req, Parser::set_method},
-            {State::LINK_req, Parser::set_method},
-            {State::LOCK_req, Parser::set_method},
-            {State::MERGE_req, Parser::set_method},
-            {State::MKACTIVITY_req, Parser::set_method},
-            {State::MKCALENDAR_req, Parser::set_method},
-            {State::MKCOL_req, Parser::set_method},
-            {State::MKREDIRECTREF_req, Parser::set_method},
-            {State::MKWORKSPACE_req, Parser::set_method},
-            {State::MOVE_req, Parser::set_method},
-            {State::OPTIONS_req, Parser::set_method},
-            {State::ORDERPATCH_req, Parser::set_method},
-            {State::PATCH_req, Parser::set_method},
-            {State::POST_req, Parser::set_method},
-            {State::PRI_req, Parser::set_method},
-            {State::PROPFIND_req, Parser::set_method},
-            {State::PROPPATCH_req, Parser::set_method},
-            {State::PUT_req, Parser::set_method},
-            {State::REBIND_req, Parser::set_method},
-            {State::REPORT_req, Parser::set_method},
-            {State::SEARCH_req, Parser::set_method},
-            {State::TRACE_req, Parser::set_method},
-            {State::UNBIND_req, Parser::set_method},
-            {State::UNCHECKOUT_req, Parser::set_method},
-            {State::UNLINK_req, Parser::set_method},
-            {State::UNLOCK_req, Parser::set_method},
-            {State::UPDATE_req, Parser::set_update_method},
-            {State::UPDATEREDIRECTREF_req, Parser::set_method},
-            {State::VERSION_CONTROL_req, Parser::set_method},
+            {ACL, RequestParser::set_method},
+            {BASELINE_CONTROL, RequestParser::set_method},
+            {BIND, RequestParser::set_method},
+            {CHECKIN, RequestParser::set_method},
+            {CHECKOUT, RequestParser::set_method},
+            {CONNECT, RequestParser::set_method},
+            {COPY, RequestParser::set_method},
+            {DELETE, RequestParser::set_method},
+            {GET, RequestParser::set_method},
+            {HEAD, RequestParser::set_method},
+            {LABEL, RequestParser::set_method},
+            {LINK, RequestParser::set_method},
+            {LOCK, RequestParser::set_method},
+            {MERGE, RequestParser::set_method},
+            {MKACTIVITY, RequestParser::set_method},
+            {MKCALENDAR, RequestParser::set_method},
+            {MKCOL, RequestParser::set_method},
+            {MKREDIRECTREF, RequestParser::set_method},
+            {MKWORKSPACE, RequestParser::set_method},
+            {MOVE, RequestParser::set_method},
+            {OPTIONS, RequestParser::set_method},
+            {ORDERPATCH, RequestParser::set_method},
+            {PATCH, RequestParser::set_method},
+            {POST, RequestParser::set_method},
+            {PRI, RequestParser::set_method},
+            {PROPFIND, RequestParser::set_method},
+            {PROPPATCH, RequestParser::set_method},
+            {PUT, RequestParser::set_method},
+            {REBIND, RequestParser::set_method},
+            {REPORT, RequestParser::set_method},
+            {SEARCH, RequestParser::set_method},
+            {TRACE, RequestParser::set_method},
+            {UNBIND, RequestParser::set_method},
+            {UNCHECKOUT, RequestParser::set_method},
+            {UNLINK, RequestParser::set_method},
+            {UNLOCK, RequestParser::set_method},
+            {UPDATE, RequestParser::set_method},
+            {UPDATEREDIRECTREF, RequestParser::set_method},
+            {VERSION_CONTROL, RequestParser::set_method},
+            {REQUEST_TARGET, RequestParser::parse_target},
         };
     return state_func_map;
   }
 
-  const std::unordered_map<State,
-                           std::function<Request(Parser &, Request &, char)>>
+  const std::unordered_map<RequestState,
+                           std::function<Request(RequestParser &, Request &)>>
       state_func_map = generate_state_func_map();
 
-  static const std::unordered_map<std::pair<State, char>,
-                                  std::pair<State, std::string_view>> &
+  static const std::unordered_map<std::pair<RequestState, std::optional<char>>,
+                                  std::pair<RequestState, std::string_view>> &
   generate_state_char_state_chars_map() {
-    static const std::unordered_map<std::pair<State, char>,
-                                    std::pair<State, std::string_view>>
+    using enum RequestState;
+    static const std::unordered_map<
+        std::pair<RequestState, std::optional<char>>,
+        std::pair<RequestState, std::string_view>>
         state_char_state_chars_map{{
-            {{State::Start, 'A'}, {State::ACL_req, "CL"}},
-            {{State::Start, 'B'}, {State::B_req, ""}},
-            {{State::B_req, 'A'},
-             {State::BASELINE_CONTROL_req, "SELINE-CONTROL"}},
-            {{State::B_req, 'I'}, {State::BIND_req, "ND"}},
-            {{State::Start, 'C'}, {State::C_req, ""}},
-            {{State::C_req, 'H'}, {State::CHECK_req, "ECK"}},
-            {{State::CHECK_req, 'I'}, {State::CHECKIN_req, "N"}},
-            {{State::CHECK_req, 'O'}, {State::CHECKOUT_req, "UT"}},
-            {{State::C_req, 'O'}, {State::CO_req, ""}},
-            {{State::CO_req, 'N'}, {State::CONNECT_req, "NECT"}},
-            {{State::CO_req, 'P'}, {State::COPY_req, "Y"}},
-            {{State::Start, 'D'}, {State::DELETE_req, "ELETE"}},
-            {{State::Start, 'G'}, {State::GET_req, "ET"}},
-            {{State::Start, 'H'}, {State::H_req_resp, ""}},
-            {{State::H_req_resp, 'E'}, {State::HEAD_req, "AD"}},
-            {{State::H_req_resp, 'T'}, {State::HTTP_resp, "TP"}},
-            {{State::Start, 'L'}, {State::L_req, ""}},
-            {{State::L_req, 'A'}, {State::LABEL_req, "BEL"}},
-            {{State::L_req, 'I'}, {State::LINK_req, "NK"}},
-            {{State::L_req, 'O'}, {State::LOCK_req, "CK"}},
-            {{State::Start, 'M'}, {State::M_req, ""}},
-            {{State::M_req, 'E'}, {State::MERGE_req, "RGE"}},
-            {{State::M_req, 'K'}, {State::MK_req, ""}},
-            {{State::MK_req, 'A'}, {State::MKACTIVITY_req, "CTIVITY"}},
-            {{State::MK_req, 'C'}, {State::MKC_req, ""}},
-            {{State::MKC_req, 'A'}, {State::MKCALENDAR_req, "LENDAR"}},
-            {{State::MKC_req, 'O'}, {State::MKCOL_req, "L"}},
-            {{State::MK_req, 'R'}, {State::MKREDIRECTREF_req, "EDIRECTREF"}},
-            {{State::MK_req, 'W'}, {State::MKWORKSPACE_req, "ORKSPACE"}},
-            {{State::M_req, 'O'}, {State::MOVE_req, "VE"}},
-            {{State::Start, 'O'}, {State::O_req, ""}},
-            {{State::O_req, 'P'}, {State::OPTIONS_req, "TIONS"}},
-            {{State::O_req, 'R'}, {State::ORDERPATCH_req, "DERPATCH"}},
-            {{State::Start, 'P'}, {State::P_req, ""}},
-            {{State::P_req, 'A'}, {State::PATCH_req, "TCH"}},
-            {{State::P_req, 'O'}, {State::POST_req, "ST"}},
-            {{State::P_req, 'R'}, {State::PR_req, ""}},
-            {{State::PR_req, 'I'}, {State::PRI_req, ""}},
-            {{State::PR_req, 'O'}, {State::PROP_req, "P"}},
-            {{State::PROP_req, 'F'}, {State::PROPFIND_req, "IND"}},
-            {{State::PROP_req, 'P'}, {State::PROPPATCH_req, "ATCH"}},
-            {{State::P_req, 'U'}, {State::PUT_req, "T"}},
-            {{State::Start, 'R'}, {State::RE_req, "E"}},
-            {{State::RE_req, 'B'}, {State::REBIND_req, "IND"}},
-            {{State::RE_req, 'P'}, {State::REPORT_req, "ORT"}},
-            {{State::Start, 'S'}, {State::SEARCH_req, "EARCH"}},
-            {{State::Start, 'T'}, {State::TRACE_req, "RACE"}},
-            {{State::Start, 'U'}, {State::U_req, ""}},
-            {{State::U_req, 'N'}, {State::UN_req, ""}},
-            {{State::UN_req, 'B'}, {State::UNBIND_req, "IND"}},
-            {{State::UN_req, 'C'}, {State::UNCHECKOUT_req, "HECKOUT"}},
-            {{State::UN_req, 'L'}, {State::UNL_req, ""}},
-            {{State::UNL_req, 'I'}, {State::UNLINK_req, "NK"}},
-            {{State::UNL_req, 'O'}, {State::UNLOCK_req, "CK"}},
-            {{State::U_req, 'P'}, {State::UPDATE_req, "DATE"}},
-            {{State::UPDATE_req, 'R'},
-             {State::UPDATEREDIRECTREF_req, "EDIRECTREF"}},
-            {{State::Start, 'V'},
-             {State::VERSION_CONTROL_req, "ERSION-CONTROL"}},
+            {{START, 'A'}, {ACL, "CL "}},
+            {{START, 'B'}, {B, ""}},
+            {{B, 'A'}, {BASELINE_CONTROL, "SELINE-CONTROL "}},
+            {{B, 'I'}, {BIND, "ND "}},
+            {{START, 'C'}, {C, ""}},
+            {{C, 'H'}, {CHECK, "ECK"}},
+            {{CHECK, 'I'}, {CHECKIN, "N "}},
+            {{CHECK, 'O'}, {CHECKOUT, "UT "}},
+            {{C, 'O'}, {CO, ""}},
+            {{CO, 'N'}, {CONNECT, "NECT "}},
+            {{CO, 'P'}, {COPY, "Y "}},
+            {{START, 'D'}, {DELETE, "ELETE "}},
+            {{START, 'G'}, {GET, "ET "}},
+            {{START, 'H'}, {HEAD, "EAD "}},
+            {{START, 'L'}, {L, ""}},
+            {{L, 'A'}, {LABEL, "BEL "}},
+            {{L, 'I'}, {LINK, "NK "}},
+            {{L, 'O'}, {LOCK, "CK "}},
+            {{START, 'M'}, {M, ""}},
+            {{M, 'E'}, {MERGE, "RGE "}},
+            {{M, 'K'}, {MK, ""}},
+            {{MK, 'A'}, {MKACTIVITY, "CTIVITY "}},
+            {{MK, 'C'}, {MKC, ""}},
+            {{MKC, 'A'}, {MKCALENDAR, "LENDAR "}},
+            {{MKC, 'O'}, {MKCOL, "L "}},
+            {{MK, 'R'}, {MKREDIRECTREF, "EDIRECTREF "}},
+            {{MK, 'W'}, {MKWORKSPACE, "ORKSPACE "}},
+            {{M, 'O'}, {MOVE, "VE "}},
+            {{START, 'O'}, {O, ""}},
+            {{O, 'P'}, {OPTIONS, "TIONS "}},
+            {{O, 'R'}, {ORDERPATCH, "DERPATCH "}},
+            {{START, 'P'}, {P, ""}},
+            {{P, 'A'}, {PATCH, "TCH "}},
+            {{P, 'O'}, {POST, "ST "}},
+            {{P, 'R'}, {PR, ""}},
+            {{PR, 'I'}, {PRI, " "}},
+            {{PR, 'O'}, {PROP, "P"}},
+            {{PROP, 'F'}, {PROPFIND, "IND "}},
+            {{PROP, 'P'}, {PROPPATCH, "ATCH "}},
+            {{P, 'U'}, {PUT, "T "}},
+            {{START, 'R'}, {RE, "E"}},
+            {{RE, 'B'}, {REBIND, "IND "}},
+            {{RE, 'P'}, {REPORT, "ORT "}},
+            {{START, 'S'}, {SEARCH, "EARCH "}},
+            {{START, 'T'}, {TRACE, "RACE "}},
+            {{START, 'U'}, {U, ""}},
+            {{U, 'N'}, {UN, ""}},
+            {{UN, 'B'}, {UNBIND, "IND "}},
+            {{UN, 'C'}, {UNCHECKOUT, "HECKOUT "}},
+            {{UN, 'L'}, {UNL, ""}},
+            {{UNL, 'I'}, {UNLINK, "NK "}},
+            {{UNL, 'O'}, {UNLOCK, "CK "}},
+            {{U, 'P'}, {UPDATE_pre, "DATE"}},
+            {{UPDATE_pre, ' '}, {UPDATE, ""}},
+            {{UPDATE_pre, 'R'}, {UPDATEREDIRECTREF, "EDIRECTREF "}},
+            {{START, 'V'}, {VERSION_CONTROL, "ERSION-CONTROL "}},
+            {{REQUEST_TARGET, {}}, {HTTP_VERSION, ""}},
         }};
     return state_char_state_chars_map;
   }
 
-  const std::unordered_map<std::pair<State, char>,
-                           std::pair<State, std::string_view>>
+  const std::unordered_map<std::pair<RequestState, std::optional<char>>,
+                           std::pair<RequestState, std::string_view>>
       state_char_state_chars_map = generate_state_char_state_chars_map();
 
-  static const std::unordered_map<State, Method> &generate_state_method_map() {
-    static const std::unordered_map<State, Method> state_method_map{
-        {State::ACL_req, Method::ACL},
-        {State::BASELINE_CONTROL_req, Method::BASELINE_CONTROL},
-        {State::BIND_req, Method::BIND},
-        {State::CHECKIN_req, Method::CHECKIN},
-        {State::CHECKOUT_req, Method::CHECKOUT},
-        {State::CONNECT_req, Method::CONNECT},
-        {State::COPY_req, Method::COPY},
-        {State::DELETE_req, Method::DELETE},
-        {State::GET_req, Method::GET},
-        {State::HEAD_req, Method::HEAD},
-        {State::LABEL_req, Method::LABEL},
-        {State::LINK_req, Method::LINK},
-        {State::LOCK_req, Method::LOCK},
-        {State::MERGE_req, Method::MERGE},
-        {State::MKACTIVITY_req, Method::MKACTIVITY},
-        {State::MKCALENDAR_req, Method::MKCALENDAR},
-        {State::MKCOL_req, Method::MKCOL},
-        {State::MKREDIRECTREF_req, Method::MKREDIRECTREF},
-        {State::MKWORKSPACE_req, Method::MKWORKSPACE},
-        {State::MOVE_req, Method::MOVE},
-        {State::OPTIONS_req, Method::OPTIONS},
-        {State::ORDERPATCH_req, Method::ORDERPATCH},
-        {State::PATCH_req, Method::PATCH},
-        {State::POST_req, Method::POST},
-        {State::PRI_req, Method::PRI},
-        {State::PROPFIND_req, Method::PROPFIND},
-        {State::PROPPATCH_req, Method::PROPPATCH},
-        {State::PUT_req, Method::PUT},
-        {State::REBIND_req, Method::REBIND},
-        {State::REPORT_req, Method::REPORT},
-        {State::SEARCH_req, Method::SEARCH},
-        {State::TRACE_req, Method::TRACE},
-        {State::UNBIND_req, Method::UNBIND},
-        {State::UNCHECKOUT_req, Method::UNCHECKOUT},
-        {State::UNLINK_req, Method::UNLINK},
-        {State::UNLOCK_req, Method::UNLOCK},
-        {State::UPDATE_req, Method::UPDATE},
-        {State::UPDATEREDIRECTREF_req, Method::UPDATEREDIRECTREF},
-        {State::VERSION_CONTROL_req, Method::VERSION_CONTROL},
+  static const std::unordered_map<RequestState, Method> &
+  generate_state_method_map() {
+    using enum RequestState;
+    static const std::unordered_map<RequestState, Method> state_method_map{
+        {ACL, Method::ACL},
+        {BASELINE_CONTROL, Method::BASELINE_CONTROL},
+        {BIND, Method::BIND},
+        {CHECKIN, Method::CHECKIN},
+        {CHECKOUT, Method::CHECKOUT},
+        {CONNECT, Method::CONNECT},
+        {COPY, Method::COPY},
+        {DELETE, Method::DELETE},
+        {GET, Method::GET},
+        {HEAD, Method::HEAD},
+        {LABEL, Method::LABEL},
+        {LINK, Method::LINK},
+        {LOCK, Method::LOCK},
+        {MERGE, Method::MERGE},
+        {MKACTIVITY, Method::MKACTIVITY},
+        {MKCALENDAR, Method::MKCALENDAR},
+        {MKCOL, Method::MKCOL},
+        {MKREDIRECTREF, Method::MKREDIRECTREF},
+        {MKWORKSPACE, Method::MKWORKSPACE},
+        {MOVE, Method::MOVE},
+        {OPTIONS, Method::OPTIONS},
+        {ORDERPATCH, Method::ORDERPATCH},
+        {PATCH, Method::PATCH},
+        {POST, Method::POST},
+        {PRI, Method::PRI},
+        {PROPFIND, Method::PROPFIND},
+        {PROPPATCH, Method::PROPPATCH},
+        {PUT, Method::PUT},
+        {REBIND, Method::REBIND},
+        {REPORT, Method::REPORT},
+        {SEARCH, Method::SEARCH},
+        {TRACE, Method::TRACE},
+        {UNBIND, Method::UNBIND},
+        {UNCHECKOUT, Method::UNCHECKOUT},
+        {UNLINK, Method::UNLINK},
+        {UNLOCK, Method::UNLOCK},
+        {UPDATE, Method::UPDATE},
+        {UPDATEREDIRECTREF, Method::UPDATEREDIRECTREF},
+        {VERSION_CONTROL, Method::VERSION_CONTROL},
     };
     return state_method_map;
   }
 
-  const std::unordered_map<State, Method> state_method_map =
+  const std::unordered_map<RequestState, Method> state_method_map =
       generate_state_method_map();
 
   Request parse();
 
-  static Request set_method(Parser &parser, Request &request, const char ch);
+  static Request set_method(RequestParser &parser, Request &request);
 
-  static Request set_update_method(Parser &parser, Request &request,
-                                   const char ch);
+  static Request parse_target(RequestParser &parser, Request &request);
+
+  static Request parse_target_connect(RequestParser &parser, Request &request);
+
+  Request parse_target_absolute(Request &request);
+
+  Request parse_target_asterisk(Request &request);
+
+  Request parse_target_origin(Request &request);
+
+  std::string parse_until_space(std::function<char(char)> fn);
 
 private:
   std::istream m_stream;
-  Request m_request;
-  State m_state;
+  Request m_request{};
+  RequestState m_state{RequestState::START};
 };
 
 } // namespace http_mp
